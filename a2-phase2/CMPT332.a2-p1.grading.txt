@@ -1,0 +1,48 @@
+CMPT 332 Grading Scheme fall 2025
+Assignment 2 - Phase 1
+
+Names:AAKASH JANA, NANDISH JHA
+NSIDs:AAJ284, NAJ474
+Student Numbers:11297343, 11282001
+GroupID:01
+
+WRONG PERMISSIONS.
+
+-3 for wrong permissions (3/10)
+
+TOTAL:  6/10 marks
+
+Feedback on Makefile  3/4
+    -Your Makefile need to clearly show how the third executable file
+    is being created.
+    -Have consistent tabbing for all your rules
+
+
+
+
+Feedback on Stubs and completeness:  3/5
+
+	Part B:     1.5/2 marks
+        (-0.5) You should check if Send() succeeded and handle the return
+
+
+	Part C:	    1.5/3 marks
+
+	Did you ask if you can use the Rtt io functions? You are supposed to be
+	using regular c sockets.
+
+	-0.5 Your sender & receiver thread need to be split up into two separate
+	functions each. The sender thread must on write to the udp port. It cannot
+	read from STDIN. You must have a separate thread do this, as per assignment
+	specification.
+
+	Your receiver thread must only receive udp packets. You must have a separate
+	thread for printing output. YOu need semaphores to coordinate these.
+
+
+	-1 No design doc.
+
+
+Feeback on git log:         0/1
+    -No git log
+

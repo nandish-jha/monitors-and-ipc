@@ -1,0 +1,558 @@
+diff -ruN a2-phase1/xv6-A2/kernel/defs.h a2-phase2/xv6-A2/kernel/defs.h
+--- a2-phase1/xv6-A2/kernel/defs.h	2025-10-23 09:11:47.215511964 -0600
++++ a2-phase2/xv6-A2/kernel/defs.h	2025-10-30 09:54:17.456119810 -0600
+@@ -102,6 +102,13 @@
+ int             either_copyin(void *dst, int user_src, uint64 src, uint64 len);
+ void            procdump(void);
+ 
++/* CMPT 332 GROUP 01 Change, Fall 2025 */
++// Mutex system calls
++uint64          sys_mtx_create(void);
++uint64          sys_mtx_lock(void);
++uint64          sys_mtx_unlock(void);
++/* End CMPT 332 GROUP 01 Change, Fall 2025 */
++
+ // swtch.S
+ void            swtch(struct context*, struct context*);
+ 
+diff -ruN a2-phase1/xv6-A2/kernel/proc.c a2-phase2/xv6-A2/kernel/proc.c
+--- a2-phase1/xv6-A2/kernel/proc.c	2025-10-23 09:11:47.263511606 -0600
++++ a2-phase2/xv6-A2/kernel/proc.c	2025-10-30 09:54:17.461119773 -0600
+@@ -15,6 +15,11 @@
+ int nextpid = 1;
+ struct spinlock pid_lock;
+ 
++/* CMPT 332 GROUP 01 Change, Fall 2025 */
++struct mutex mutexes[NMUTEX];
++struct spinlock mutex_table_lock;
++/* End CMPT 332 GROUP 01 Change, Fall 2025 */
++
+ extern void forkret(void);
+ static void freeproc(struct proc *p);
+ 
+@@ -56,6 +61,17 @@
+       p->state = UNUSED;
+       p->kstack = KSTACK((int) (p - proc));
+   }
++
++  /* CMPT 332 GROUP 01 Change, Fall 2025 */
++  // Initialize mutex table
++  initlock(&mutex_table_lock, "mutex_table");
++  for(int i = 0; i < NMUTEX; i++) {
++    initlock(&mutexes[i].lock, "mutex");
++    mutexes[i].locked = 0;
++    mutexes[i].used = 0;
++    mutexes[i].owner = 0;
++  }
++  /* End CMPT 332 GROUP 01 Change, Fall 2025 */
+ }
+ 
+ // Must be called with interrupts disabled,
+@@ -687,3 +703,104 @@
+     printf("\n");
+   }
+ }
++
++/* CMPT 332 GROUP 01 Change, Fall 2025 */
++// Create a mutex lock and return its ID
++uint64
++sys_mtx_create(void)
++{
++  int locked;
++  
++  // Get the initial lock state from the argument
++  argint(0, &locked);
++  
++  acquire(&mutex_table_lock);
++  
++  // Find an unused mutex slot
++  for(int i = 0; i < NMUTEX; i++) {
++    if(!mutexes[i].used) {
++      mutexes[i].used = 1;
++      mutexes[i].locked = locked ? 1 : 0;
++      mutexes[i].owner = locked ? myproc() : 0;
++      release(&mutex_table_lock);
++      return i;  // Return mutex ID
++    }
++  }
++  
++  release(&mutex_table_lock);
++  return -1;  // No available mutex slots
++}
++
++// Lock a mutex (blocks until acquired)
++uint64
++sys_mtx_lock(void)
++{
++  int lock_id;
++  
++  // Get the mutex ID from the argument
++  argint(0, &lock_id);
++  
++  // Validate mutex ID
++  if(lock_id < 0 || lock_id >= NMUTEX) {
++    return -1;
++  }
++  
++  acquire(&mutex_table_lock);
++  
++  // Check if mutex exists
++  if(!mutexes[lock_id].used) {
++    release(&mutex_table_lock);
++    return -1;
++  }
++  
++  release(&mutex_table_lock);
++  
++  // Acquire the specific mutex lock
++  acquire(&mutexes[lock_id].lock);
++  
++  // Wait until the mutex is unlocked
++  while(mutexes[lock_id].locked) {
++    sleep(&mutexes[lock_id], &mutexes[lock_id].lock);
++  }
++  
++  // Lock the mutex
++  mutexes[lock_id].locked = 1;
++  mutexes[lock_id].owner = myproc();
++  
++  release(&mutexes[lock_id].lock);
++  return 0;
++}
++
++// Unlock a mutex
++uint64
++sys_mtx_unlock(void)
++{
++  int lock_id;
++  
++  // Get the mutex ID from the argument
++  argint(0, &lock_id);
++  
++  // Validate mutex ID
++  if(lock_id < 0 || lock_id >= NMUTEX) {
++    return -1;
++  }
++  
++  acquire(&mutexes[lock_id].lock);
++  
++  // Check if mutex exists and is locked
++  if(!mutexes[lock_id].used || !mutexes[lock_id].locked) {
++    release(&mutexes[lock_id].lock);
++    return -1;
++  }
++  
++  // Unlock the mutex
++  mutexes[lock_id].locked = 0;
++  mutexes[lock_id].owner = 0;
++  
++  // Wake up any waiting processes
++  wakeup(&mutexes[lock_id]);
++  
++  release(&mutexes[lock_id].lock);
++  return 0;
++}
++/* End CMPT 332 GROUP 01 Change, Fall 2025 */
+diff -ruN a2-phase1/xv6-A2/kernel/proc.h a2-phase2/xv6-A2/kernel/proc.h
+--- a2-phase1/xv6-A2/kernel/proc.h	2025-10-23 09:11:47.266511583 -0600
++++ a2-phase2/xv6-A2/kernel/proc.h	2025-10-30 09:54:17.466119736 -0600
+@@ -18,6 +18,18 @@
+   uint64 s11;
+ };
+ 
++/* CMPT 332 GROUP 01 Change, Fall 2025 */
++#define NMUTEX 64  // Maximum number of mutexes
++
++// Mutex lock structure
++struct mutex {
++  struct spinlock lock;  // Spinlock for internal synchronization
++  int locked;           // Is the mutex locked? (0 = unlocked, 1 = locked)
++  int used;            // Is this mutex slot in use?
++  struct proc *owner;  // Process that owns the lock (for debugging)
++};
++/* End CMPT 332 GROUP XX Change, Fall 2025 */
++
+ // Per-CPU state.
+ struct cpu {
+   struct proc *proc;          // The process running on this cpu, or null.
+diff -ruN a2-phase1/xv6-A2/kernel/syscall.c a2-phase2/xv6-A2/kernel/syscall.c
+--- a2-phase1/xv6-A2/kernel/syscall.c	2025-10-23 09:11:47.298511344 -0600
++++ a2-phase2/xv6-A2/kernel/syscall.c	2025-10-30 09:54:17.470119705 -0600
+@@ -102,6 +102,9 @@
+ extern uint64 sys_mkdir(void);
+ extern uint64 sys_close(void);
+ extern uint64 sys_trace(void); /* CMPT 332 Nandish Jha NAJ474 11282001 2025 change */
++extern uint64 sys_mtx_create(void); /* CMPT 332 GROUP 01 Change, Fall 2025 */
++extern uint64 sys_mtx_lock(void);   /* CMPT 332 GROUP 01 Change, Fall 2025 */
++extern uint64 sys_mtx_unlock(void); /* CMPT 332 GROUP 01 Change, Fall 2025 */
+ 
+ // An array mapping syscall numbers from syscall.h
+ // to the function that handles the system call.
+@@ -128,6 +131,9 @@
+ [SYS_mkdir]   sys_mkdir,
+ [SYS_close]   sys_close,
+ [SYS_trace]   sys_trace, /* CMPT 332 Nandish Jha NAJ474 11282001 2025 change */
++[SYS_mtx_create] sys_mtx_create, /* CMPT 332 GROUP 01 Change, Fall 2025 */
++[SYS_mtx_lock]   sys_mtx_lock,   /* CMPT 332 GROUP 01 Change, Fall 2025 */
++[SYS_mtx_unlock] sys_mtx_unlock, /* CMPT 332 GROUP 01 Change, Fall 2025 */
+ };
+ 
+ /* CMPT 332 Nandish Jha NAJ474 11282001 2025 change */
+@@ -154,6 +160,9 @@
+   [SYS_mkdir]   = "mkdir",
+   [SYS_close]   = "close",
+   [SYS_trace]   = "trace", /* CMPT 332 Nandish Jha NAJ474 11282001 2025 change */
++  [SYS_mtx_create] = "mtx_create", /* CMPT 332 GROUP 01 Change, Fall 2025 */
++  [SYS_mtx_lock]   = "mtx_lock",   /* CMPT 332 GROUP 01 Change, Fall 2025 */
++  [SYS_mtx_unlock] = "mtx_unlock", /* CMPT 332 GROUP 01 Change, Fall 2025 */
+ };
+ 
+ void
+diff -ruN a2-phase1/xv6-A2/kernel/syscall.h a2-phase2/xv6-A2/kernel/syscall.h
+--- a2-phase1/xv6-A2/kernel/syscall.h	2025-10-23 09:11:47.300511329 -0600
++++ a2-phase2/xv6-A2/kernel/syscall.h	2025-10-30 09:54:17.475119668 -0600
+@@ -21,3 +21,6 @@
+ #define SYS_mkdir  20
+ #define SYS_close  21
+ #define SYS_trace  22 /* CMPT 332 Nandish Jha NAJ474 11282001 2025 change */
++#define SYS_mtx_create 23 /* CMPT 332 GROUP 01 Change, Fall 2025 */
++#define SYS_mtx_lock   24 /* CMPT 332 GROUP 01 Change, Fall 2025 */
++#define SYS_mtx_unlock 25 /* CMPT 332 GROUP 01 Change, Fall 2025 */
+diff -ruN a2-phase1/xv6-A2/user/mtxtest.c a2-phase2/xv6-A2/user/mtxtest.c
+--- a2-phase1/xv6-A2/user/mtxtest.c	1969-12-31 18:00:00.000000000 -0600
++++ a2-phase2/xv6-A2/user/mtxtest.c	2025-10-30 10:33:34.615473523 -0600
+@@ -0,0 +1,75 @@
++/*
++AAKASH JANA AAJ284 11297343
++NANDISH JHA NAJ474 11282001
++*/
++
++/* CMPT 332 GROUP 01 Change, Fall 2025 */
++/* Producer-Consumer using kernel mutex with user-level threads (uthread) */
++
++#include "kernel/types.h"
++#include "user/user.h"
++#include "uthread.h"
++
++static int shared_data = 0;
++static int produced_flag = 0;
++static int mutex_id;
++
++// Forward decl for thread_exit provided by uthread_lib.c
++void thread_exit(void);
++
++static void producer_thread(void)
++{
++    printf("[thread] Producer: starting\n");
++    mtx_lock(mutex_id);
++    printf("[thread] Producer: got mutex, writing data\n");
++    shared_data = 42;
++    printf("[thread] Producer: produced data = %d\n", shared_data);
++    mtx_unlock(mutex_id);
++    produced_flag = 1;
++    // Yield to let consumer run
++    thread_yield();
++    printf("[thread] Producer: done\n");
++    thread_exit();
++}
++
++static void consumer_thread(void)
++{
++    printf("[thread] Consumer: starting\n");
++    // Wait until producer has produced something (cooperative yield)
++    while (!produced_flag)
++        thread_yield();
++
++    mtx_lock(mutex_id);
++    printf("[thread] Consumer: got mutex, reading shared_data = %d\n", shared_data);
++    shared_data = shared_data * 2;  // consume/transform the data
++    printf("[thread] Consumer: processed data, new value = %d\n", shared_data);
++    mtx_unlock(mutex_id);
++    printf("[thread] Consumer: released mutex, finished\n");
++    thread_exit();
++}
++
++int main(void)
++{
++    printf("Producer-Consumer test using mutex with user-level threads\n");
++
++    // Create mutex
++    mutex_id = mtx_create(0);
++    if (mutex_id < 0) {
++        printf("Failed to create mutex\n");
++        exit(1);
++    }
++    printf("Created mutex with ID: %d\n", mutex_id);
++
++    // Initialize thread system and create threads
++    thread_init();
++    thread_create(producer_thread);
++    thread_create(consumer_thread);
++
++    // Run the scheduler until threads exit
++    thread_schedule();
++
++    // If we return here, all threads exited or no runnable threads remain
++    printf("[main] Final shared_data value: %d\n", shared_data);
++    exit(0);
++}
++/* End CMPT 332 GROUP 01 Change, Fall 2025 */
+\ No newline at end of file
+diff -ruN a2-phase1/xv6-A2/user/user.h a2-phase2/xv6-A2/user/user.h
+--- a2-phase1/xv6-A2/user/user.h	2025-10-23 09:11:47.389510665 -0600
++++ a2-phase2/xv6-A2/user/user.h	2025-10-30 09:54:17.482119616 -0600
+@@ -27,6 +27,13 @@
+ int uptime(void);
+ int trace(int mask); /* CMPT 332 Nandish Jha NAJ474 11282001 2025 change */
+ 
++/* CMPT 332 GROUP 01 Change, Fall 2025 */
++// Mutex system calls
++int mtx_create(int locked);
++int mtx_lock(int lock_id);
++int mtx_unlock(int lock_id);
++/* End CMPT 332 GROUP 01 Change, Fall 2025 */
++
+ // ulib.c
+ int stat(const char*, struct stat*);
+ char* strcpy(char*, const char*);
+diff -ruN a2-phase1/xv6-A2/user/usys.pl a2-phase2/xv6-A2/user/usys.pl
+--- a2-phase1/xv6-A2/user/usys.pl	2025-10-23 09:11:47.399510589 -0600
++++ a2-phase2/xv6-A2/user/usys.pl	2025-10-30 09:54:17.486119586 -0600
+@@ -43,3 +43,9 @@
+ entry("pause");
+ entry("uptime");
+ entry("trace"); # CMPT 332 Nandish Jha NAJ474 11282001 2025 change
++
++# CMPT 332 GROUP 01 Change, Fall 2025
++entry("mtx_create");
++entry("mtx_lock");
++entry("mtx_unlock");
++# End CMPT 332 GROUP 01 Change, Fall 2025
+diff -ruN a2-phase1/xv6-A2/user/uthread.c a2-phase2/xv6-A2/user/uthread.c
+--- a2-phase1/xv6-A2/user/uthread.c	2025-10-23 09:11:47.401510575 -0600
++++ a2-phase2/xv6-A2/user/uthread.c	2025-10-30 10:29:37.343246565 -0600
+@@ -1,10 +1,12 @@
+ /*
+-NANDISH JHA NANJ474 11282001
++AAKASH JANA AAJ284 11297343
++NANDISH JHA NAJ474 11282001
+ */
+ 
+ #include "kernel/types.h"
+ #include "kernel/stat.h"
+ #include "user/user.h"
++#include "uthread.h"
+ 
+ /* Possible states of a thread: */
+ #define FREE        0x0
+@@ -124,78 +126,9 @@
+   thread_schedule();
+ }
+ 
+-volatile int a_started, b_started, c_started;
+-volatile int a_n, b_n, c_n;
+-
+-void 
+-thread_a(void)
+-{
+-  int i;
+-  printf("thread_a started\n");
+-  a_started = 1;
+-  while(b_started == 0 || c_started == 0)
+-    thread_yield();
+-  
+-  for (i = 0; i < 100; i++) {
+-    printf("thread_a %d\n", i);
+-    a_n += 1;
+-    thread_yield();
+-  }
+-  printf("thread_a: exit after %d\n", a_n);
+-
+-  current_thread->state = FREE;
+-  thread_schedule();
+-}
+-
+-void 
+-thread_b(void)
++void
++thread_exit(void)
+ {
+-  int i;
+-  printf("thread_b started\n");
+-  b_started = 1;
+-  while(a_started == 0 || c_started == 0)
+-    thread_yield();
+-  
+-  for (i = 0; i < 100; i++) {
+-    printf("thread_b %d\n", i);
+-    b_n += 1;
+-    thread_yield();
+-  }
+-  printf("thread_b: exit after %d\n", b_n);
+-
+   current_thread->state = FREE;
+   thread_schedule();
+ }
+-
+-void 
+-thread_c(void)
+-{
+-  int i;
+-  printf("thread_c started\n");
+-  c_started = 1;
+-  while(a_started == 0 || b_started == 0)
+-    thread_yield();
+-  
+-  for (i = 0; i < 100; i++) {
+-    printf("thread_c %d\n", i);
+-    c_n += 1;
+-    thread_yield();
+-  }
+-  printf("thread_c: exit after %d\n", c_n);
+-
+-  current_thread->state = FREE;
+-  thread_schedule();
+-}
+-
+-int 
+-main(int argc, char *argv[]) 
+-{
+-  a_started = b_started = c_started = 0;
+-  a_n = b_n = c_n = 0;
+-  thread_init();
+-  thread_create(thread_a);
+-  thread_create(thread_b);
+-  thread_create(thread_c);
+-  thread_schedule();
+-  exit(0);
+-}
+diff -ruN a2-phase1/xv6-A2/user/uthread_demo.c a2-phase2/xv6-A2/user/uthread_demo.c
+--- a2-phase1/xv6-A2/user/uthread_demo.c	1969-12-31 18:00:00.000000000 -0600
++++ a2-phase2/xv6-A2/user/uthread_demo.c	2025-10-30 10:29:49.589155049 -0600
+@@ -0,0 +1,72 @@
++/*
++AAKASH JANA AAJ284 11297343
++NANDISH JHA NAJ474 11282001
++*/
++
++// Demo program for user-level threads: runs three threads a/b/c
++#include "kernel/types.h"
++#include "user/user.h"
++#include "uthread.h"
++
++static volatile int a_started, b_started, c_started;
++static volatile int a_n, b_n, c_n;
++
++static void thread_a(void)
++{
++  int i;
++  printf("thread_a started\n");
++  a_started = 1;
++  while(b_started == 0 || c_started == 0)
++    thread_yield();
++  for (i = 0; i < 100; i++) {
++    printf("thread_a %d\n", i);
++    a_n += 1;
++    thread_yield();
++  }
++  printf("thread_a: exit after %d\n", a_n);
++  thread_exit();
++}
++
++static void thread_b(void)
++{
++  int i;
++  printf("thread_b started\n");
++  b_started = 1;
++  while(a_started == 0 || c_started == 0)
++    thread_yield();
++  for (i = 0; i < 100; i++) {
++    printf("thread_b %d\n", i);
++    b_n += 1;
++    thread_yield();
++  }
++  printf("thread_b: exit after %d\n", b_n);
++  thread_exit();
++}
++
++static void thread_c(void)
++{
++  int i;
++  printf("thread_c started\n");
++  c_started = 1;
++  while(a_started == 0 || b_started == 0)
++    thread_yield();
++  for (i = 0; i < 100; i++) {
++    printf("thread_c %d\n", i);
++    c_n += 1;
++    thread_yield();
++  }
++  printf("thread_c: exit after %d\n", c_n);
++  thread_exit();
++}
++
++int main(void)
++{
++  a_started = b_started = c_started = 0;
++  a_n = b_n = c_n = 0;
++  thread_init();
++  thread_create(thread_a);
++  thread_create(thread_b);
++  thread_create(thread_c);
++  thread_schedule();
++  exit(0);
++}
+diff -ruN a2-phase1/xv6-A2/user/uthread.h a2-phase2/xv6-A2/user/uthread.h
+--- a2-phase1/xv6-A2/user/uthread.h	1969-12-31 18:00:00.000000000 -0600
++++ a2-phase2/xv6-A2/user/uthread.h	2025-10-30 10:29:32.521282600 -0600
+@@ -0,0 +1,18 @@
++/*
++AAKASH JANA AAJ284 11297343
++NANDISH JHA NAJ474 11282001
++*/
++
++// Simple user-level threads interface for xv6 user programs
++// Extracted from uthread.c to allow reuse by other programs
++
++#ifndef UTHREAD_H
++#define UTHREAD_H
++
++void thread_init(void);
++void thread_schedule(void);
++void thread_create(void (*func)());
++void thread_yield(void);
++void thread_exit(void);
++
++#endif // UTHREAD_H
+--- a2-phase1/xv6-A2/Makefile	2025-10-23 09:11:47.199512084 -0600
++++ a2-phase2/xv6-A2/Makefile	2025-10-30 10:30:02.300060060 -0600
+@@ -145,7 +145,8 @@
+ 	$U/_find\
+ 	$U/_primes\
+ 	$U/_trace\
+-	$U/_uthread
++	$U/_uthread\
++	$U/_mtxtest
+ 
+ # Here, ABOVE
+ # CMPT 332 Nandish Jha NAJ474 11282001 2025 change
+@@ -154,11 +155,17 @@
+ $U/uthread_switch.o: $U/uthread_switch.S
+ 	$(CC) $(CFLAGS) -c -o $U/uthread_switch.o $U/uthread_switch.S
+ 
+-$U/_uthread: $U/uthread.o $U/uthread_switch.o $(ULIB)
++$U/_uthread: $U/uthread_demo.o $U/uthread.o $U/uthread_switch.o $(ULIB)
+ 	$(LD) $(LDFLAGS) -N -e main -T $U/user.ld -Ttext 0 -o \
+-		$U/_uthread $U/uthread.o $U/uthread_switch.o $(ULIB)
++		$U/_uthread $U/uthread_demo.o $U/uthread.o $U/uthread_switch.o $(ULIB)
+ 	$(OBJDUMP) -S $U/_uthread > $U/uthread.asm
+ 
++# Build mtxtest with user-level thread library and context switch ASM
++$U/_mtxtest: $U/mtxtest.o $U/uthread.o $U/uthread_switch.o $(ULIB)
++	$(LD) $(LDFLAGS) -N -e main -T $U/user.ld -Ttext 0 -o \
++		$U/_mtxtest $U/mtxtest.o $U/uthread.o $U/uthread_switch.o $(ULIB)
++	$(OBJDUMP) -S $U/_mtxtest > $U/mtxtest.asm
++
+ fs.img: mkfs/mkfs README $(UPROGS)
+ 	mkfs/mkfs fs.img README $(UPROGS)
+ 
