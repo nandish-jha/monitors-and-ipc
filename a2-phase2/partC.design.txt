@@ -1,0 +1,113 @@
+/*
+AAKASH JANA AAJ284 11297343
+NANDISH JHA NAJ474 11282001
+*/
+
+Part C Design Document – Phase 2
+CMPT 332 Assignment 2 (Real-Time Threads UDP Chat)
+Authors: Aakash Jana (AAJ284), Nandish Jha (NAJ474)
+
+1. Overview
+This program implements a simple chat facility using UDP sockets
+and the RT Threads library. Two users on different machines 
+communicate by sending timestamped messages over the network.
+All I/O is non-blocking, and four RT threads are used to
+separate keyboard input, UDP reception, display, and transmission.
+
+2. Program Execution
+Users agree on their machine names and port numbers. Each side runs:
+
+    s-chat  <myPort>  <peerHost>  <peerPort>
+
+Example:
+Aakash: s-chat 30001 tux7 39001
+Nandish: s-chat 39001 cmpt332-ppc 30001
+
+Every line typed appears on both terminals with the 
+sending time in seconds and microseconds. 
+Typing 'exit' ends the session gracefully.
+
+3. Thread Structure
+Four RT threads execute concurrently under the RT Threads scheduler.
+
+Thread Name       Purpose
+-----------------------------------------------------------
+keyboard_input    Reads stdin non-blockingly and queues outgoing messages.
+speaker_thread    Dequeues outgoing messages and sends them over UDP.
+listener_thread   Receives UDP datagrams and queues incoming messages.
+display_thread    Dequeues incoming messages and prints them on screen.
+
+4. Inter-Thread Communication
+Two shared lists (from Assignment 1) act as bounded buffers:
+
+* outgoing_msgs – used between keyboard and speaker threads.
+* incoming_msgs – used between listener and display threads.
+
+Each list is protected by its own RT Threads semaphore
+(in_msg_access_sem, out_msg_access_sem) to guarantee mutual exclusion.
+Threads that find no messages sleep briefly (RttSleep(1)) to yield CPU time.
+
+5. Message Format
+Every message is packed into a binary record before transmission:
+
+--------------------------------------------------------------
+| uint32 sec | uint32 usec | uint16 len | char[len] payload  |
+--------------------------------------------------------------
+
+* sec and usec store the timestamp from gettimeofday().
+* All multi-byte fields are converted to network byte order (htonl/htons).
+* At the receiver, fields are restored with ntohl/ntohs and copied using
+  memcpy to avoid unaligned access on PowerPC or ARM CPUs.
+
+This ensures portability between little-endian (x86) 
+and big-endian architectures.
+
+6. Non-Blocking I/O
+Both stdin and the UDP socket are set to O_NONBLOCK using fcntl().
+The keyboard and listener threads handle EAGAIN and EWOULDBLOCK errors by
+sleeping and re-trying without blocking the entire process.
+Before exit, stdin’s flags are restored to blocking mode to protect the shell.
+
+7. Synchronization and Critical Sections
+All list operations (ListAppend, ListRemove, ListCount, ListFirst) occur
+inside RttP() and RttV() critical sections. These regions prevent race
+conditions between producer and consumer threads. 
+Semaphores are created using:
+
+    RttAllocSem(&in_msg_access_sem, 1, RTTFCFS);
+    RttAllocSem(&out_msg_access_sem, 1, RTTFCFS);
+
+8. Thread Scheduling Attributes
+Each thread uses the same RT Threads scheduling attributes:
+
+    attrs.startingtime = RTTZEROTIME;
+    attrs.priority     = RTTNORM;
+    attrs.deadline     = RTTNODEADLINE;
+
+These ensure fair, round-robin scheduling without specific deadlines.
+Threads yield periodically via short sleeps to allow context switches.
+
+9. Session Termination
+If the user types 'exit', keyboard_input sets shutdown_flag = 1.
+mainp() detects this flag, prints a shutdown message, kills all threads
+using RttKill(), closes the UDP socket, and restores terminal state.
+Typing 'exit' on one side causes both programs to terminate gracefully.
+
+10. Error Handling and Validation
+* All UDP packets are validated for minimum length (>= 10 bytes).
+* If a packet claims a message length longer than received, it is discarded.
+* datalen is clamped to MAXLINE to prevent overflow.
+* recvfrom and sendto errors are reported via perror().
+
+11. Portability and Testing
+The program was tested between tux7 (x86_64) and cmpt332-ppc (PowerPC)
+machines to verify byte-order independence and aligned memory access.
+Messages are correctly displayed on both platforms without crashes.
+
+12. Summary
+This design achieves the required goals:
+* Four RT threads coordinated by semaphores and lists.
+* Non-blocking UDP and keyboard I/O.
+* Binary timestamped messages that work across architectures.
+* Graceful session termination and clean resource release.
+
