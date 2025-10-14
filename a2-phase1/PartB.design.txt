@@ -1,0 +1,132 @@
+AAKASH JANA AAJ284 11297343
+NANDISH JHA NAJ474 11282001
+
+CMPT 332 Assignment 2 - Part B Design
+
+------------------------------------------------------------
+Monitor Solution Strategy (Detailed)
+------------------------------------------------------------
+
+Our monitor uses UBC pthreads and the Send/Receive/Reply IPC model.
+All monitor operations are centralized through a dedicated monitor server.
+This server is a UBC pthreads process, created once in MonInit().
+It runs an infinite loop, waiting for messages from client threads.
+Each message represents a monitor operation (MonEnter, MonLeave,
+MonWait, MonSignal, MonInit).
+The server processes each message, prints a debug statement, and replies.
+This ensures only one thread interacts with the monitor at a time.
+
+**Key Components:**
+
+1. **Monitor Server Process:**
+   - Created using Create() in MonInit().
+   - Waits for messages using Receive().
+   - Handles each monitor operation in a switch statement.
+   - Replies to each sender using Reply().
+   - Can be extended to manage monitor state and queues.
+
+2. **Monitor API Functions:**
+   - Each function (MonEnter, MonLeave, etc.) sends a message to the server.
+   - The calling thread blocks until the server replies.
+   - This guarantees serialized access to the monitor.
+
+3. **Message Structure:**
+   - Each message has a type (operation) and an argument (e.g., condition).
+   - The server can be extended to track more state as needed.
+
+4. **Condition Variables:**
+   - For Phase 1, MonWait and MonSignal only print debug messages.
+   - In future phases, the server will manage queues for each condition.
+
+**How the Monitor Works:**
+
+- A thread calls MonEnter(), which sends a MON_ENTER message to the server.
+- The server receives the message, prints a debug statement, and replies.
+- The thread is unblocked and can proceed.
+- The same pattern is used for MonLeave, MonWait, and MonSignal.
+- MonInit() starts the server and initializes the monitor.
+
+------------------------------------------------------------
+Pseudocode for Monitor Operations (Expanded)
+------------------------------------------------------------
+
+Monitor Server (runs as a UBC pthreads process):
+
+    initialize monitor state (e.g., number of condition variables)
+    loop forever:
+        sender, msglen = Receive()
+        msg = received message (type and arg)
+        switch msg.type:
+            case MON_ENTER:
+                print "MonEnter received from", sender
+                // (future: check monitor state, block if needed)
+            case MON_LEAVE:
+                print "MonLeave received from", sender
+                // (future: update state, unblock next thread)
+            case MON_WAIT:
+                print "MonWait for cond", msg.arg, "from", sender
+                // (future: add sender to wait queue)
+            case MON_SIGNAL:
+                print "MonSignal for cond", msg.arg, "from", sender
+                // (future: unblock a waiting thread)
+            case MON_INIT:
+                print "MonInit with", msg.arg, "condition variables"
+                // (future: initialize condition state)
+        Reply(sender, reply_msg) // reply is a simple acknowledgment
+
+Monitor API (called by user threads):
+
+    MonInit(numConds):
+        if monitor_server not started:
+            monitor_server_pid = Create(monitor_server, ...)
+        msg = {type: MON_INIT, arg: numConds}
+        Send(monitor_server_pid, msg)
+        // Waits for reply
+
+    MonEnter():
+        msg = {type: MON_ENTER}
+        Send(monitor_server_pid, msg)
+        // Waits for reply
+
+    MonLeave():
+        msg = {type: MON_LEAVE}
+        Send(monitor_server_pid, msg)
+        // Waits for reply
+
+    MonWait(cond):
+        msg = {type: MON_WAIT, arg: cond}
+        Send(monitor_server_pid, msg)
+        // Waits for reply
+
+    MonSignal(cond):
+        msg = {type: MON_SIGNAL, arg: cond}
+        Send(monitor_server_pid, msg)
+        // Waits for reply
+
+------------------------------------------------------------
+Why This Solution is Correct (Detailed)
+------------------------------------------------------------
+
+- **Mutual Exclusion:** All monitor operations go through the server.
+  Only one thread can interact with the monitor at a time.
+  Send/Receive/Reply ensures threads block until the server is ready.
+
+- **Correctness of IPC:** UBC pthreads' primitives guarantee reliable
+  message delivery and synchronization. The sender blocks until the
+  server replies, so no two threads can execute monitor code together.
+
+- **Extensibility:** The design is modular and can be extended to support
+  full monitor semantics, such as condition variables and signaling.
+  The server can be enhanced to manage queues and implement correct
+  semantics for MonWait and MonSignal.
+
+- **Debuggability and Testability:** For Phase 1, the server prints all
+  received messages, making it easy to verify that monitor operations
+  are serialized and IPC is working.
+
+- **Separation of Concerns:** The monitor server handles all
+  synchronization and state. Client threads only send requests and wait
+  for replies. This separation makes the design easy to reason about
+  and extend.
+
+------------------------------------------------------------
