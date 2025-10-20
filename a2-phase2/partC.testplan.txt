@@ -1,0 +1,333 @@
+/*
+AAKASH JANA AAJ284 11297343
+NANDISH JHA NAJ474 11282001
+*/
+
+Part C White-Box Test Plan
+
+1. Goal of Testing
+The purpose of this test plan is to verify, using white-box methods,
+that our s-chat implementation for Part C Phase 2 meets the required
+functional, synchronization, and portability behaviors:
+  - Non-blocking keyboard and socket I/O
+  - Four-thread architecture with shared lists and semaphores
+  - Safe message packing/unpacking with timestamps
+  - Cross-architecture correctness (x86_64, PPC, ARM)
+  - Graceful shutdown when the user types 'exit'
+
+We tested incrementally as we built features. The sections below
+describe tests performed, how we exercised specific code paths,
+and what we considered "pass" criteria.
+
+
+2. Unit-Level Feature Testing
+2.1. Socket Send / Receive Primitives
+Objective:
+  Verify that UDP socket setup, bind(), and sendto()/recvfrom() work.
+
+Procedure:
+  - Launch s-chat on tux7 with:
+        ./s-chat 30001 tux7 30002
+  - On the same machine, use netcat (nc -u) to simulate the peer:
+        echo "hi" | nc -u 127.0.0.1 30001
+  - Observe that listener_thread() receives bytes and prints them.
+
+What this exercises:
+  - socket() and bind() in mainp()
+  - fcntl(O_NONBLOCK) in listener_thread()
+  - recvfrom() path in listener_thread()
+  - EAGAIN / EWOULDBLOCK handling when no data is present
+
+Pass criteria:
+  - Program does not block.
+  - Program prints a received message or reports a truncated packet
+    instead of crashing.
+  - No segfault when no peer is connected.
+
+
+2.2. Keyboard Input Path
+Objective:
+  Verify that stdin is read in non-blocking mode and queued for
+  transmission.
+
+Procedure:
+  - Run s-chat on tux7.
+  - Type several lines at the terminal, including short and long
+    messages, and confirm they are printed as "You enterred msg".
+  - Confirm that stdin was set to O_NONBLOCK and restored on exit.
+
+What this exercises:
+  - fcntl(O_NONBLOCK) on STDIN in mainp()
+  - read() loop in keyboard_input()
+  - EAGAIN / EWOULDBLOCK path in keyboard_input()
+  - Creation of ChatMessage objects (timestamp, msglen, msg)
+  - ListAppend() into outgoing_msgs under in_msg_access_sem
+
+Pass criteria:
+  - No blocking waiting for input.
+  - Messages appear locally at the time they are typed.
+  - After exit, the shell's terminal behaves normally (stdin
+    flags restored).
+
+
+2.3. Outgoing Path (speaker_thread)
+Objective:
+  Verify that messages queued by keyboard_input() are removed in
+  speaker_thread() and sent over UDP in packed binary format.
+
+Procedure:
+  - Run two copies of s-chat on tux7 with different ports:
+        ./s-chat 30001 127.0.0.1 30002
+        ./s-chat 30002 127.0.0.1 30001
+  - Type text in one instance and confirm that the other instance
+    receives it.
+
+What this exercises:
+  - RttP()/RttV() critical sections around outgoing_msgs
+  - ListCount(), ListFirst(), ListRemove()
+  - Binary serialization in speaker_thread():
+        sec (htonl), usec (htonl), msglen (htons), payload
+  - sendto() to cliaddr
+
+Pass criteria:
+  - Messages appear on the peer.
+  - 'Sent msg:' is printed for each dequeued ChatMessage.
+  - No busy-spin: speaker_thread() sleeps briefly if the queue
+    is empty.
+
+
+2.4. Incoming Path (listener_thread + display_thread)
+Objective:
+  Verify that received network packets are unpacked into
+  ChatMessage objects and displayed with timestamps.
+
+Procedure:
+  - With two s-chat instances running, send messages in both
+    directions.
+  - Confirm that display_thread() prints output in the format:
+        <sec> sec : <usec> usec
+        Received Msg: <text>
+
+What this exercises:
+  - Non-blocking recvfrom() in listener_thread()
+  - memcpy() into aligned locals (sec, usec, datalen)
+  - ntohl()/ntohs() conversion of header fields
+  - Bounds checks for malformed packets:
+        - n < 10 (too small for header)
+        - n < 10 + datalen (truncated payload)
+        - datalen > MAXLINE (clamped)
+  - Enqueue into incoming_msgs under out_msg_access_sem
+  - Dequeue/print/free cycle in display_thread()
+
+Pass criteria:
+  - No segfault on malformed or short packets.
+  - Timestamps and payload text match what was typed by the peer.
+  - Repeated messages are displayed in FIFO order.
+
+
+3. Control-Flow / Edge-Case Testing
+3.1. Poll loops and EAGAIN behavior
+Objective:
+  Ensure that threads that poll do not starve the scheduler.
+
+Procedure:
+  - Confirm that when no data is available:
+        - keyboard_input() hits EAGAIN and calls RttSleep(1)
+        - listener_thread() hits EAGAIN and calls RttSleep(1)
+        - speaker_thread() sees empty outgoing_msgs and sleeps
+        - display_thread() sees empty incoming_msgs and sleeps
+  - Run under gdb and watch thread switching.
+
+What this exercises:
+  - Cooperative scheduling under RttCreate() threads using RTTNORM
+    priority and RttSleep(1).
+  - No thread sits in a tight infinite loop starving the others
+    (a correctness condition for this RT library).
+
+Pass criteria:
+  - All four threads continue to run in parallel (no starvation).
+  - CPU usage remains reasonable instead of spinning at 100%.
+
+
+3.2. Defensive branches using gdb
+Objective:
+  Exercise code paths that are hard to trigger naturally.
+
+Procedure:
+  - In gdb, force variables to simulate corrupted packets:
+        - Alter 'datalen' in listener_thread() after ntohs()
+          to be larger than the actual recvfrom() length.
+        - Step through the 'truncated packet' branch
+          (the "ignoring" / "too small" messages).
+  - Force ListCount() to return 0 by clearing queues and confirm
+    that speaker_thread() and display_thread() take their sleep
+    path instead of crashing.
+
+Pass criteria:
+  - The program prints the correct "ignoring" diagnostics.
+  - No memory corruption or segfault from bogus header sizes.
+  - Threads that find empty lists do not dereference NULL.
+
+
+4. Integration and Cross-Architecture Testing
+4.1. x86_64 <-> PowerPC
+Objective:
+  Confirm that timestamp packing/unpacking and network byte order
+  work across different CPU endianness and alignment rules.
+
+Procedure:
+  - Run one side on tux7 (x86_64):
+        ./s-chat 30001 cmpt332-ppc 30002
+  - Run the other side on cmpt332-ppc (PowerPC):
+        ./s-chat 30002 tux7 30001
+  - Exchange multi-line messages in both directions.
+
+What this exercises:
+  - htonl()/ntohl(), htons()/ntohs()
+  - memcpy() instead of unaligned casts when reading from the
+    network buffer
+  - display_thread() printing timestamps from the remote host
+
+Pass criteria:
+  - Messages appear correctly on both machines.
+  - Timestamps print without garbage characters.
+  - No segfault on PPC (originally PPC crashed due to unaligned
+    32-bit loads and mismatched printf formats; this was fixed).
+
+
+4.2. x86_64 <-> ARM and PPC <-> ARM
+Objective:
+  Confirm that the same code works (no #ifdef paths) on all lab
+  architectures. Only the Makefile changes between builds.
+
+Procedure:
+  - Repeat the above two-way messaging test using tux (x86_64),
+    cmpt332-arm, and cmpt332-ppc in different pairs.
+  - Send short and long messages.
+  - Leave sessions using 'exit'.
+
+Pass criteria:
+  - Messages travel bidirectionally between all pairs of hosts.
+  - Program exits cleanly after 'exit' on either side.
+  - stdin flags are restored on exit (the shell is still usable).
+
+
+5. Shutdown / Cleanup Testing
+Objective:
+  Verify graceful shutdown and cleanup after 'exit'.
+
+Procedure:
+  - While two peers are connected, type:
+        exit
+    on one side.
+  - Observe:
+        - shutdown_flag is set in keyboard_input()
+        - mainp() sees shutdown_flag and begins shutdown
+        - threads are terminated via RttKill()
+        - socket closed
+        - stdin flags restored (fcntl back to original)
+
+What this exercises:
+  - The special "user leaves session" branch required by
+    the assignment spec.
+  - Resource cleanup logic in mainp().
+
+Pass criteria:
+  - The program prints "s-chat: Shutting down..." and returns
+    to the shell prompt.
+  - There is no zombie process left running on any machine.
+
+
+6. Summary of Coverage
+By combining:
+  - direct stdin and UDP tests,
+  - artificial error forcing in gdb,
+  - and live multi-machine chat sessions across x86_64, PPC,
+    and ARM,
+
+we exercised:
+  - all four RT threads,
+  - both semaphore-protected queues,
+  - all recv/send paths,
+  - malformed packet handling,
+  - the empty-queue sleep paths,
+  - shutdown/cleanup paths.
+
+All major branches in the code have been executed, either through
+normal operation or by forcing edge values under gdb.
+No crashes remain, and the system behaves to spec.
+
+
+Below is the output of the execution between Linux running on tux7 and ppc :- 
+Linux :- 
+naj474@tux7:~/Desktop/cmpt332/Assignment2/
+cmpt332-a2/a2-phase2> ./s-chat 30001 cmpt332-ppc 30002
+Reached function: ListCreate - Creating new empty list
+   ListCreate: List created successfully
+Reached function: ListCreate - Creating new empty list
+   ListCreate: List created successfully
+s-chat: All threads created
+hello PPC Computer
+You enterred msg : hello PPC Computer
+Sent msg: hello PPC Computer
+                1761462640 sec : 197528 usec
+                Received Msg: hello Linux computer
+
+Nice Talking to you PPC, it was a sunny day today.
+You enterred msg : Nice Talking to you PPC, it was a sunny day today.
+Sent msg: Nice Talking to you PPC, it was a sunny day today.
+                1761462700 sec : 796727 usec
+                Received Msg: It was! I was enjoying a chilled pinacolada 
+                while my CPU was idling at 10%
+
+Alright PPC I will see you later!
+You enterred msg : Alright PPC I will see you later!
+Sent msg: Alright PPC I will see you later!
+                1761462743 sec : 216585 usec
+                Received Msg: No problem! See you later alligator!
+
+                1761462748 sec : 266426 usec
+                Received Msg: exit
+
+exit
+You enterred msg : exit
+Sent msg: exit
+s-chat: Shutting down...
+naj474@tux7:~/Desktop/cmpt332/Assignment2/cmpt332-a2/a2-phase2> 
+
+
+On PPC :- 
+naj474@cmpt332-ppc:~/Desktop/cmpt332/Assignment2/cmpt332-a2/a2-phase2> 
+./s-chat 30002 tux7 30001
+
+Reached function: ListCreate - Creating new empty list
+   ListCreate: List created successfully
+Reached function: ListCreate - Creating new empty list
+   ListCreate: List created successfully
+s-chat: All threads created
+                1761462630 sec : 33690 usec
+                Received Msg: hello PPC Computer
+
+hello Linux computer
+You enterred msg : hello Linux computer
+Sent msg: hello Linux computer
+                1761462660 sec : 333696 usec
+                Received Msg: Nice Talking to you PPC, 
+                it was a sunny day today.
+
+It was! I was enjoying a chilled pinacolada while my CPU was idling at 10%
+You enterred msg : It was! I was enjoying a chilled pinacolada 
+while my CPU was idling at 10%
+Sent msg: It was! I was enjoying a chilled pinacolada while my 
+CPU was idling at 10%
+                1761462718 sec : 913790 usec
+                Received Msg: Alright PPC I will see you later!
+
+No problem! See you later alligator!
+You enterred msg : No problem! See you later alligator!
+Sent msg: No problem! See you later alligator!
+exit
+You enterred msg : exit
+Sent msg: exit
+s-chat: Shutting down...
+naj474@cmpt332-ppc:~/Desktop/cmpt332/Assignment2/cmpt332-a2/a2-phase2> 
